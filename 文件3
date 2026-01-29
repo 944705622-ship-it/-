@@ -1,0 +1,133 @@
+# scraper.py
+import requests
+from bs4 import BeautifulSoup
+import json
+import re
+import time
+import os
+from datetime import datetime
+
+# 配置目标城市（可扩展）
+CITIES_CONFIG = [
+    {
+        "name": "信阳市",
+        "list_url": "http://www.xinyang.gov.cn/xxgk/xwdt/gsgg/",
+        "link_selector": "ul.list-news li a",
+        "content_selector": ".article-content",
+        "secretary_name": "蔡松涛"
+    },
+    {
+        "name": "焦作市",
+        "list_url": "http://www.jiaozuo.gov.cn/jzsz/zwgk_15937/tzgg/",
+        "link_selector": "div.article-list ul li a",
+        "content_selector": ".content",
+        "secretary_name": "李亦博"
+    },
+    {
+        "name": "延边朝鲜族自治州",
+        "list_url": "http://www.yanbian.gov.cn/zwgk/gzdt/",
+        "link_selector": "ul.list-unstyled li a",
+        "content_selector": ".view-content",
+        "secretary_name": "洪庆"
+    }
+    # TODO: 可继续添加其他城市
+]
+
+def safe_get(url, timeout=10):
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; MayorQuoteBot/1.0)'}
+        resp = requests.get(url, headers=headers, timeout=timeout)
+        resp.raise_for_status()
+        resp.encoding = 'utf-8'
+        return resp
+    except Exception as e:
+        print(f"⚠️ 请求失败 {url}: {e}")
+        return None
+
+def extract_quotes_from_city(config):
+    quotes = []
+    resp = safe_get(config["list_url"])
+    if not resp:
+        return quotes
+
+    soup = BeautifulSoup(resp.text, 'html.parser')
+    links = soup.select(config["link_selector"])
+    
+    for link in links[:3]:  # 只抓最新3条，避免过载
+        href = link.get('href')
+        title = link.get_text().strip()
+        if not href or not href.startswith('http'):
+            continue
+
+        print(f"🔍 正在分析: {title}")
+        detail_resp = safe_get(href)
+        if not detail_resp:
+            continue
+
+        dsoup = BeautifulSoup(detail_resp.text, 'html.parser')
+        content_div = dsoup.select_one(config["content_selector"])
+        if not content_div:
+            continue
+
+        text = content_div.get_text()
+        # 匹配书记讲话（增强鲁棒性）
+        patterns = [
+            f"{config['secretary_name']}.*?[强调指出要求表示称].*?[。！？]",
+            f"[市委书委书记]{config['secretary_name']}.*?[。！？]"
+        ]
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            for m in matches:
+                quote = re.sub(r'\s+', ' ', m).strip()
+                if len(quote) > 20 and len(quote) < 200:  # 过滤过短/过长
+                    quotes.append({
+                        "quote": quote,
+                        "occasion": title,
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                        "location": config["name"],
+                        "keywords": ["自动采集"],
+                        "source": href,
+                        "secretary": config["secretary_name"]
+                    })
+                    break  # 每篇新闻只取第一条
+            if quotes:
+                break
+
+        time.sleep(1)  # 礼貌等待
+
+    return quotes
+
+def load_existing_quotes():
+    if os.path.exists('quotes.json'):
+        with open('quotes.json', 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return []
+
+def save_quotes(quotes):
+    with open('quotes.json', 'w', encoding='utf-8') as f:
+        json.dump(quotes, f, ensure_ascii=False, indent=2)
+
+def main():
+    print("🚀 开始自动采集市委书记金句...")
+    existing = load_existing_quotes()
+    existing_set = {q["quote"] for q in existing}
+    new_quotes = []
+
+    for config in CITIES_CONFIG:
+        print(f"\n📍 处理城市: {config['name']}")
+        found = extract_quotes_from_city(config)
+        for q in found:
+            if q["quote"] not in existing_set:
+                new_quotes.append(q)
+                existing_set.add(q["quote"])
+                print(f"✅ 新增: {q['quote'][:50]}...")
+
+    if new_quotes:
+        all_quotes = existing + new_quotes
+        save_quotes(all_quotes)
+        print(f"\n🎉 成功新增 {len(new_quotes)} 条金句！")
+    else:
+        print("\nℹ️ 未发现新金句。")
+
+if __name__ == '__main__':
+    main()
